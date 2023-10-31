@@ -1,0 +1,133 @@
+name: Generate Web Artifacts and Docker Image Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  SOURCE_BROWSER: https://www.nuget.org/api/v2/package/SourceBrowser/1.0.43
+  SOLUTION_FILE: .\efcore\All.sln
+  ARTIFACTS_ZIP: artifacts.zip
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/source-efcore
+
+jobs:
+  generate-artifacts:
+    runs-on: windows-latest
+    steps:
+      # Checkout git repository
+      # https://github.com/actions/checkout
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: 'true'
+
+      - name: Download HtmlGenerator
+        run: |
+          Invoke-WebRequest ${{ env.SOURCE_BROWSER }} -o HtmlGenerator.zip
+
+      - name: Setup HtmlGenerator
+        run: |
+          Expand-Archive -Path HtmlGenerator.zip -DestinationPath .\bin
+
+      - name: Run HtmlGenerator
+        run: |
+          .\bin\tools\HtmlGenerator.exe ${{ env.SOLUTION_FILE }} /out:.\app /force
+          
+      - name: Check artifacts
+        run: |
+          dir app
+
+      - name: Archive artifacts
+        run: |
+          Compress-Archive -Path .\app\* -DestinationPath ${{ env.ARTIFACTS_ZIP }}
+
+      # Upload artifacts
+      # https://github.com/actions/upload-artifact
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: artifacts
+          path: ${{ env.ARTIFACTS_ZIP }}
+
+
+  build-publish-image:
+    runs-on: ubuntu-latest
+    needs: generate-artifacts
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      # Checkout git repository
+      # https://github.com/actions/checkout
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Download Artifacts
+      # https://github.com/actions/download-artifact
+      - name: Download Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: artifacts
+          path: artifacts
+
+      - name: Expand artifacts
+        run: |
+          unzip ./artifacts/${{ env.ARTIFACTS_ZIP }} -d ./app
+
+      - name: Check downloaded artifacts
+        run: |
+          ls -l ./app
+
+      # Install the cosign tool except on PR
+      # https://github.com/sigstore/cosign-installer
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.1.2
+
+      # Setup QEMU
+      # https://github.com/docker/setup-qemu-action
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      # Setup Docker buildx
+      # https://github.com/docker/setup-buildx-action
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v2
+
+      # Login against a Docker registry except on PR
+      # https://github.com/docker/login-action
+      - name: Log into registry ${{ env.REGISTRY }}
+        uses: docker/login-action@v3.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,format=long
+
+      # Build and push Docker image with Buildx (don't push on PR)
+      # https://github.com/docker/build-push-action
+      - name: Build and push Docker image
+        id: build-and-push
+        uses: docker/build-push-action@v5.0.0
+        with:
+          context: .
+          platforms: linux/amd64, linux/arm64
+          provenance: false
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max       
